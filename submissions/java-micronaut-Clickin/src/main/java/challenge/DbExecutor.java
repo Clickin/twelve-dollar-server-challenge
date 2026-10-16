@@ -15,34 +15,17 @@ import java.util.function.Supplier;
 public final class DbExecutor {
     private static final Logger LOG = LoggerFactory.getLogger(DbExecutor.class);
     static final int CAPACITY = 4096, BATCH_SIZE = 256;
-    // Lab toggle: read-only batches of several requests share one deferred read transaction.
-    static final boolean READ_TX = Boolean.getBoolean("db.readtx");
     private static final Task<Void> STOP = new Task<>(false, () -> null);
     private final ArrayBlockingQueue<Task<?>> queue = new ArrayBlockingQueue<>(CAPACITY);
     private final Object admission = new Object();
     private boolean accepting;
     private Thread worker;
-    private Transactions tx;
-
-    /** Transaction control on the connection owned by the worker thread. */
-    interface Transactions {
-        void begin(boolean write) throws Exception;
-        void commit() throws Exception;
-        void rollback() throws Exception;
-    }
+    private PreparedStatement begin, commit, rollback;
 
     void start(Connection connection) throws SQLException {
-        PreparedStatement begin = connection.prepareStatement("BEGIN IMMEDIATE"), beginRead = connection.prepareStatement("BEGIN"),
-            commit = connection.prepareStatement("COMMIT"), rollback = connection.prepareStatement("ROLLBACK");
-        start(new Transactions() {
-            public void begin(boolean write) throws SQLException { (write ? begin : beginRead).executeUpdate(); }
-            public void commit() throws SQLException { commit.executeUpdate(); }
-            public void rollback() throws SQLException { rollback.executeUpdate(); }
-        });
-    }
-
-    void start(Transactions transactions) {
-        tx = transactions;
+        begin = connection.prepareStatement("BEGIN IMMEDIATE");
+        commit = connection.prepareStatement("COMMIT");
+        rollback = connection.prepareStatement("ROLLBACK");
         synchronized (admission) {
             accepting = true;
             worker = Thread.ofPlatform().name("db-owner").start(this::run);
@@ -94,19 +77,18 @@ public final class DbExecutor {
                 }
                 boolean writes = false;
                 for (var task : batch) writes |= task.write;
-                boolean grouped = writes || (READ_TX && batch.size() > 1);
                 boolean transaction = false;
                 boolean usable = true;
                 try {
-                    if (grouped) { tx.begin(writes); transaction = true; }
+                    if (writes) { begin.executeUpdate(); transaction = true; }
                     for (var task : batch) task.execute();
-                    if (grouped) { tx.commit(); transaction = false; }
+                    if (writes) { commit.executeUpdate(); transaction = false; }
                     // Reads in this batch may have seen its writes; publish neither before COMMIT.
                     for (var task : batch) task.complete();
                 } catch (Throwable failure) {
                     if (transaction) {
-                        try { tx.rollback(); }
-                        catch (Exception uncertain) {
+                        try { rollback.executeUpdate(); }
+                        catch (SQLException uncertain) {
                             failure.addSuppressed(uncertain);
                             usable = false;
                         }

@@ -77,15 +77,6 @@ connection). The settings aim for steady state with minor collections only:
 
 Settings and flags only affect the JVM process; nothing changes the kernel or host.
 
-### Lab toggles
-
-`Database` and `DbExecutor` contain system-property toggles that were used for A/B tests
-and are **off by default**: `-Dsqlite.driver=ffm` (SQLite through FFM), `-Dread.inline=true`
-(reads on the event loop), `-Dfeed.rows=true` and `-Ddb.readtx=true`. The JDBC driver on the
-DB-owner thread is the measured and submitted configuration. Neither FFM nor inline reads
-were meaningfully faster than JDBC on the DB-owner thread, and inline reads were worse at
-high connection counts.
-
 ## Measurements
 
 Measured on DigitalOcean droplets in `syd1`: the server is `s-1vcpu-2gb` (the challenge

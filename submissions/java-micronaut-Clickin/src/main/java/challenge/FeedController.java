@@ -40,11 +40,9 @@ public final class FeedController {
         }).exceptionally(e -> response(503, new Responses.Degraded("degraded", "unreachable", "internal server error")));
     }
     @Get("/feed") public CompletableFuture<HttpResponse<?>> feed() {
-        if (Database.READ_INLINE) return handle(() -> CompletableFuture.completedFuture(response(200, db.feedInline())));
         return handle(() -> executor.read(() -> response(200, db.feed())));
     }
     @Get("/posts/{id}") public CompletableFuture<HttpResponse<?>> post(String id) {
-        if (Database.READ_INLINE) return handle(() -> CompletableFuture.completedFuture(response(200, db.findInline(id(id)))));
         return handle(() -> { long postId = id(id); return executor.read(() -> response(200, db.find(postId))); });
     }
     @Post(value="/posts", consumes=MediaType.ALL)
