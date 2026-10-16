@@ -9,13 +9,14 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.concurrent.*;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 @Singleton
 public final class DbExecutor {
     private static final Logger LOG = LoggerFactory.getLogger(DbExecutor.class);
     static final int CAPACITY = 4096, BATCH_SIZE = 256;
-    private static final Task<Void> STOP = new Task<>(false, () -> null);
+    private static final Task<Void> STOP = new Task<>(false, () -> null, null);
     private final ArrayBlockingQueue<Task<?>> queue = new ArrayBlockingQueue<>(CAPACITY);
     private final Object admission = new Object();
     private boolean accepting;
@@ -35,10 +36,18 @@ public final class DbExecutor {
     private static final class Task<T> {
         final boolean write;
         final Supplier<T> action;
+        /** Maps a failure to a value so the caller needs no second future; null completes the future exceptionally. */
+        final Function<Throwable, T> onError;
         final CompletableFuture<T> future = new CompletableFuture<>();
         T value;
         ApiException error;
-        Task(boolean write, Supplier<T> action) { this.write = write; this.action = action; }
+        Task(boolean write, Supplier<T> action, Function<Throwable, T> onError) {
+            this.write = write; this.action = action; this.onError = onError;
+        }
+        void fail(Throwable failure) {
+            if (onError == null) future.completeExceptionally(failure);
+            else future.complete(onError.apply(failure));
+        }
         void execute() {
             try { value = action.get(); }
             catch (ApiException e) {
@@ -48,17 +57,20 @@ public final class DbExecutor {
         }
         void complete() {
             if (error == null) future.complete(value);
-            else future.completeExceptionally(error);
+            else fail(error);
         }
     }
 
-    public <T> CompletableFuture<T> read(Supplier<T> action) { return submit(false, action); }
-    public <T> CompletableFuture<T> write(Supplier<T> action) { return submit(true, action); }
-    private <T> CompletableFuture<T> submit(boolean write, Supplier<T> action) {
-        var task = new Task<>(write, action);
+    public <T> CompletableFuture<T> read(Supplier<T> action) { return submit(false, action, null); }
+    public <T> CompletableFuture<T> write(Supplier<T> action) { return submit(true, action, null); }
+    /** As {@link #read(Supplier)}, but a failure completes the single future with {@code onError(failure)}. */
+    public <T> CompletableFuture<T> read(Supplier<T> action, Function<Throwable, T> onError) { return submit(false, action, onError); }
+    public <T> CompletableFuture<T> write(Supplier<T> action, Function<Throwable, T> onError) { return submit(true, action, onError); }
+    private <T> CompletableFuture<T> submit(boolean write, Supplier<T> action, Function<Throwable, T> onError) {
+        var task = new Task<>(write, action, onError);
         synchronized (admission) {
             if (!accepting || !queue.offer(task))
-                task.future.completeExceptionally(new ApiException(503, "internal server error"));
+                task.fail(new ApiException(503, "internal server error"));
         }
         return task.future;
     }
@@ -95,7 +107,7 @@ public final class DbExecutor {
                     }
                     LOG.error("SQLite batch failed", failure);
                     for (var task : batch)
-                        task.future.completeExceptionally(new ApiException(500, "internal server error"));
+                        task.fail(new ApiException(500, "internal server error"));
                     if (!usable || failure instanceof Error) break;
                 }
                 batch.clear();
@@ -106,7 +118,7 @@ public final class DbExecutor {
             synchronized (admission) { accepting = false; }
             Task<?> task;
             while ((task = queue.poll()) != null)
-                task.future.completeExceptionally(new ApiException(503, "internal server error"));
+                task.fail(new ApiException(503, "internal server error"));
         }
     }
 

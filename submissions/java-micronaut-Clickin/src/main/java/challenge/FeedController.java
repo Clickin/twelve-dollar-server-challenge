@@ -30,27 +30,32 @@ public final class FeedController {
         return response(500, new Responses.Error("internal server error"));
     }
     private CompletableFuture<HttpResponse<?>> handle(Supplier<CompletableFuture<HttpResponse<?>>> action) {
-        try { return action.get().exceptionally(FeedController::failure); }
+        // Failures raised before the DB call (auth, validation) become a response here; failures inside the DB call
+        // are mapped by DbExecutor itself, so a request creates a single CompletableFuture.
+        try { return action.get(); }
         catch (ApiException e) { return CompletableFuture.completedFuture(failure(e)); }
     }
     @Get("/health") public CompletableFuture<HttpResponse<?>> health() {
         return executor.<HttpResponse<?>>read(() -> {
             if (!db.health()) throw new IllegalStateException("SELECT 1 failed");
             return response(200, new Responses.Health("ok", "ok", (System.nanoTime() - started) / 1_000_000_000));
-        }).exceptionally(e -> response(503, new Responses.Degraded("degraded", "unreachable", "internal server error")));
+        }, e -> response(503, new Responses.Degraded("degraded", "unreachable", "internal server error")));
     }
     @Get("/feed") public CompletableFuture<HttpResponse<?>> feed() {
-        return handle(() -> executor.read(() -> response(200, db.feed())));
+        return handle(() -> executor.<HttpResponse<?>>read(() -> response(200, db.feed()), FeedController::failure));
     }
     @Get("/posts/{id}") public CompletableFuture<HttpResponse<?>> post(String id) {
-        return handle(() -> { long postId = id(id); return executor.read(() -> response(200, db.find(postId))); });
+        return handle(() -> {
+            long postId = id(id);
+            return executor.<HttpResponse<?>>read(() -> response(200, db.find(postId)), FeedController::failure);
+        });
     }
     @Post(value="/posts", consumes=MediaType.ALL)
     public CompletableFuture<HttpResponse<?>> create(HttpRequest<?> request, @Nullable @Body String raw) {
         return handle(() -> {
             var user = jwt.verify(request.getHeaders().get("Authorization"));
             String body = body(raw);
-            return executor.write(() -> response(201, new Responses.Single(db.create(user, body))));
+            return executor.<HttpResponse<?>>write(() -> response(201, new Responses.Single(db.create(user, body))), FeedController::failure);
         });
     }
     @Post(value="/posts/{id}/like", consumes=MediaType.ALL)
@@ -58,10 +63,10 @@ public final class FeedController {
         return handle(() -> {
             var user = jwt.verify(request.getHeaders().get("Authorization"));
             long postId = id(id);
-            return executor.write(() -> {
+            return executor.<HttpResponse<?>>write(() -> {
                 boolean already = db.like(user.id(), postId);
                 return response(already ? 200 : 201, new Responses.Like(true, already, postId));
-            });
+            }, FeedController::failure);
         });
     }
     static long id(String value) {
