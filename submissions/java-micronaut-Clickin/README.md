@@ -5,6 +5,7 @@
 | Language | Java 25 (Eclipse Temurin `25.0.2+10`, SHA-256 verified by `install.sh`) |
 | Framework | Micronaut 5.2.15 (Platform 5.2.2) on Netty 4.2.19.Final (`nio`) |
 | JSON | Micronaut Serialization (Serde) 3.2.4 with **build-time bean introspection**: `@Serdeable` records are processed by `micronaut-serde-processor` at compile time, so there is no runtime reflection and no `jackson-databind`. Jackson annotations (`@JsonPropertyOrder`) fix the field order, and only the Jackson 3.2.3 streaming core reads and writes the JSON text. It handles request bodies and the small write, health, and error responses; feed and post reads are JSON bytes rendered by SQLite and bypass it. |
+| JWT | Hand-written HS256 check on the JDK's `Mac` (HmacSHA256): verified on every authenticated request (`POST /posts`, `POST /posts/:id/like`); `alg` must be `HS256`, constant-time signature comparison (`MessageDigest.isEqual`), fresh `exp`, `sub`, and `username` checks. No verification cache. |
 | SQLite driver | `org.xerial:sqlite-jdbc` 3.53.4.0 |
 | Build | Gradle 9.5.0 wrapper (checksum-verified), Shadow 9.6.1, dependencies pinned in `gradle.lockfile` |
 | **Nginx or direct** | **Direct** on `HOST:PORT` (`0.0.0.0:80` on the benchmark VM, default `127.0.0.1:3000`) |
@@ -48,33 +49,36 @@ At 56k–64k open keep-alive connections, live old-generation footprint is ~220�
 
 **Procedure** (the README's scoring procedure): one server process for the whole search, a 1,000-VU 2-minute warm-up that is not scored, then 2,500 VUs doubling until a run fails, narrowing to within 250 VUs, and a confirmation hold at the best passing level (stepping down by 250 on failure). Every run is the official shape: 60 s ramp, 5-minute hold, 30 s ramp-down. Pass: p95 < 500 ms, p99 < 1 s, errors < 1% (a run fails if either generator fails). Hold columns show the worse of the two generators.
 
-**Confirmed maximum: 79,500 VUs** (hold p99 232 ms, 0% errors, 92% CPU, 110 µs per request). 80,000 VUs failed (p99 1.4 s).
+**Confirmed maximum: 84,500 VUs** (hold p99 218 ms, p95 98 ms, 0% errors, 92% CPU, 103 µs per request). 84,750 VUs failed (p99 1.9 s, 0.67% errors).
+
+**Comfortable operating range: about 70,000 VUs.** The 80,000-VU doubling step already shows p99 903 ms with 0.05% errors, and between 82,500 and 84,750 VUs p99 swings from 217 ms to 1.9 s from run to run, so the confirmed maximum sits right at the edge. At 70,000 VUs (the same JAR, same droplets, two runs each of an A/B) CPU stayed at 86–87% and hold p99 was 134–216 ms with 0% errors in both runs.
 
 | Step | VUs | Result | Hold req/s | Hold p95 (ms) | Hold p99 (ms) | Errors | Server CPU | CPU / req | Full GC |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| double | 2,500 | pass | 264 | 1 | 6 | 0.00% | 10% | 384 µs | 0 |
-| double | 5,000 | pass | 529 | 1 | 6 | 0.00% | 14% | 268 µs | 0 |
-| double | 10,000 | pass | 1,060 | 1 | 10 | 0.00% | 24% | 224 µs | 0 |
-| double | 20,000 | pass | 2,115 | 2 | 15 | 0.00% | 42% | 196 µs | 0 |
-| double | 40,000 | pass | 4,231 | 7 | 24 | 0.00% | 65% | 153 µs | 0 |
-| double | 80,000 | **fail** | 8,452 | 387 | 1,436 | 0.33% | 92% | 109 µs | 1 |
-| narrow | 60,000 | pass | 6,345 | 29 | 75 | 0.00% | 82% | 130 µs | 1 |
-| narrow | 70,000 | pass | 7,399 | 58 | 104 | 0.00% | 87% | 118 µs | 1 |
-| narrow | 75,000 | pass | 7,923 | 77 | 134 | 0.00% | 90% | 114 µs | 1 |
-| narrow | 77,500 | pass | 8,185 | 82 | 163 | 0.00% | 91% | 112 µs | 1 |
-| narrow | 78,750 | pass | 8,311 | 117 | 218 | 0.00% | 92% | 111 µs | 1 |
-| narrow | 79,250 | pass | 8,343 | 291 | 747 | 0.27% | 93% | 112 µs | 1 |
-| narrow | 79,500 | pass | 8,390 | 136 | 316 | 0.00% | 92% | 109 µs | 1 |
-| narrow | 79,750 | pass | 8,390 | 326 | 736 | 0.16% | 93% | 111 µs | 1 |
-| confirm | 79,750 | **fail** | 8,402 | 742 | 2,087 | 1.13% | 93% | 111 µs | 1 |
-| confirm | 79,500 | pass | 8,394 | 127 | 232 | 0.00% | 92% | 110 µs | 1 |
+| double | 2,500 | pass | 265 | 1 | 8 | 0.00% | 10% | 377 µs | 0 |
+| double | 5,000 | pass | 529 | 1 | 8 | 0.00% | 15% | 280 µs | 0 |
+| double | 10,000 | pass | 1,058 | 1 | 11 | 0.00% | 24% | 229 µs | 0 |
+| double | 20,000 | pass | 2,118 | 1 | 14 | 0.00% | 39% | 186 µs | 0 |
+| double | 40,000 | pass | 4,232 | 5 | 21 | 0.00% | 63% | 148 µs | 0 |
+| double | 80,000 | pass | 8,423 | 173 | 903 | 0.05% | 91% | 108 µs | 1 |
+| double | 100,000 | **fail** | 10,117 | 2877 | 3671 | 1.23% | 99% | 98 µs | 4 |
+| narrow | 90,000 | **fail** | 9,392 | 690 | 1123 | 0.38% | 97% | 103 µs | 1 |
+| narrow | 85,000 | **fail** | 8,875 | 962 | 1577 | 0.77% | 95% | 108 µs | 1 |
+| narrow | 82,500 | pass | 8,689 | 247 | 819 | 0.21% | 92% | 106 µs | 1 |
+| narrow | 83,750 | pass | 8,815 | 274 | 948 | 0.22% | 93% | 106 µs | 1 |
+| narrow | 84,250 | pass | 8,897 | 107 | 316 | 0.03% | 94% | 105 µs | 1 |
+| narrow | 84,500 | pass | 8,922 | 99 | 241 | 0.00% | 92% | 103 µs | 1 |
+| narrow | 84,750 | **fail** | 8,882 | 824 | 1921 | 0.67% | 94% | 106 µs | 1 |
+| confirm | 84,500 | pass | 8,922 | 97 | 217 | 0.00% | 92% | 103 µs | 1 |
 
 Notes:
 
-- **Raised descriptor limit.** This search ran the server with `LimitNOFILE=131072`, because more than 65,535 connections need more descriptors than the challenge's default per-process limit of 65,535 (it reached 70,018 open descriptors at 70,000 VUs). With the default limit, one process holds at most about 65.5k connections, so the score cannot exceed that regardless of CPU. On the default limit, with a single generator and a fresh JVM per step, **64,000 VUs** passed (6,766 req/s, p95 48 ms, p99 283 ms, 0% errors, 82% CPU, 120 µs/req, 0 Full GCs). A 65,000-VU run failed on the generator's side (it stopped at 64,512 connections, the source-port limit), while the server peaked at 64,530 descriptors.
-- **Near the limit it is flaky.** Between 79,250 and 79,750 VUs, p99 swings between 232 ms and 2.1 s from run to run (79,750 passed its search run, then failed its confirmation run), with the CPU at 92–93%. A single Full GC of 0.5–1.0 s per run appears from 60,000 VUs up, because earlier runs' dead connection state remains in the old generation of the same JVM.
-- **Host variance.** The same JAR cost 225 µs per request on an `sgp1` droplet and 110–150 µs on `syd1` droplets; steal spikes and host differences move the ceiling by several thousand VUs. The 62,500-VU pass on an earlier `syd1` droplet pair, where 64,000 failed at 135 µs per request, is the same JAR on a busier host.
+- **Raised descriptor limit.** This search ran the server with `LimitNOFILE=131072`, because more than 65,535 connections need more descriptors than the challenge's default per-process limit of 65,535 (it reached 70,018 open descriptors at 70,000 VUs). With the default limit, one process holds at most about 65.5k connections, so the score cannot exceed that regardless of CPU. On the default limit, with a single generator and a fresh JVM per step (an earlier revision of this code, before the single-`CompletableFuture` change, which measured the same CPU per request in an A/B), **64,000 VUs** passed (6,766 req/s, p95 48 ms, p99 283 ms, 0% errors, 82% CPU, 120 µs/req, 0 Full GCs). A 65,000-VU run failed on the generator's side (it stopped at 64,512 connections, the source-port limit), while the server peaked at 64,530 descriptors.
+- **Near the limit it is flaky.** Between 80,000 and 84,750 VUs, hold p99 swings between 217 ms and 1.9 s, with the CPU at 91–94%. A single Full GC of about 0.4–0.7 s per run appears from 80,000 VUs up, because earlier runs' dead connection state remains in the old generation of the same JVM.
+- **Host variance.** The same code cost 225 µs per request on an `sgp1` droplet and 103–150 µs on `syd1` droplets; steal spikes and host differences move the ceiling by several thousand VUs. Earlier searches on other `syd1` droplets confirmed 79,500 VUs (previous revision) and 62,500 VUs (a busier host pair), so treat the confirmed maximum as a range of roughly 80–85k on this hardware rather than a fixed number.
+- **HotSpot JIT over GraalVM Native Image.** Native Image builds of the same JAR (Oracle GraalVM 25, `-O3`, Serial GC, with and without profile-guided optimization) were compared with HotSpot at 70,000 VUs, two runs each in ABBA order, same droplets: JIT cost 116–118 µs per request with hold p99 134–216 ms; native PGO 121–123 µs with p99 about 555 ms; native plain 126–130 µs with p99 about 553 ms in one run and 1.7 s (failed) in the other. JIT won on every metric, so `start.sh` runs the JAR on HotSpot.
 - **Not an official score.** This is a self-run search with a Rust generator, not the k6 run on the maintainer's droplet.
+
 
 ## Verification
 
